@@ -13,6 +13,7 @@ from app.services.pipeline_orchestrator import (
     run_experiment_stat_pipeline,
     run_forecast_pipeline,
     run_metric_agg_pipeline,
+    run_quality_rescan,
     run_quality_scan,
 )
 
@@ -72,6 +73,13 @@ def trigger_experiment_stat(
 def trigger_quality_scan() -> ActionResult:
     result = run_quality_scan()
     return ActionResult(ok=True, message="质量扫描管道已执行", entry=result)
+
+
+@router.post("/quality-rescan", response_model=ActionResult)
+def trigger_quality_rescan() -> ActionResult:
+    """缺分母规则补齐实测行数后重新扫描，刷新异常率与评分。"""
+    result = run_quality_rescan()
+    return ActionResult(ok=True, message="质量补扫管道已执行", entry=result)
 
 
 @router.post("/attribution-compare", response_model=ActionResult)

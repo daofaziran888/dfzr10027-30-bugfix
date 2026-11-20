@@ -17,9 +17,10 @@ from app.fixtures import (
     DIMENSIONS,
     EXPERIMENT_RESULTS,
     METRIC_DEFS,
-    QUALITY_CHECK_SAMPLES,
+    QUALITY_RESCAN_SAMPLES,
     TREND_POINTS,
 )
+from app.services.quality_scan import quality_scan_service
 from app.store import store
 
 # ---------------------------------------------------------------------------
@@ -343,28 +344,17 @@ def run_experiment_stat_pipeline(experiment_code: str | None = None) -> dict[str
 # ---------------------------------------------------------------------------
 
 def run_quality_scan() -> dict[str, Any]:
-    """扫描 fixtures 质量样本与 store 中各模块数据，生成跨模块质量报告。"""
-    samples = list(QUALITY_CHECK_SAMPLES)
-    issues: list[dict] = []
-    total_rows = 0
-    total_anomalies = 0
+    """扫描质量样本与 store 中各模块数据，生成跨模块质量报告。
 
-    for s in samples:
-        anomaly = _to_int(s.get("异常行数"))
-        total_anomalies += anomaly
-        # 模拟总行数
-        estimated = max(anomaly, 1000)
-        total_rows += estimated
-        if anomaly > 0:
-            issues.append({
-                "规则编号": s.get("规则编号"),
-                "监控对象": s.get("监控对象"),
-                "异常行数": anomaly,
-                "空值率": s.get("空值率"),
-                "重复率": s.get("重复率"),
-            })
+    分母口径修复：不再用 max(异常数, 1000) 的占位行数估算，而是读取每条
+    「批次×规则」实测结果里的真实扫描行数；异常数与分母必须来自同一批实测
+    范围。只有异常数的历史摘要标记为缺分母，不参与异常率与评分。
+    """
+    # 幂等灌入 fixtures 实测样本（同批同规则重试只保留一个有效结果）。
+    quality_scan_service.seed_fixture_samples()
+    summary = quality_scan_service.summarize()
 
-    # 扫描 store 各模块的 abnormal 标记
+    # 扫描 store 各模块的 abnormal 标记（沿用原有跨模块异常发现能力）。
     module_issues: list[dict] = []
     for mod in store.module_names():
         if mod.startswith("_"):
@@ -374,13 +364,21 @@ def run_quality_scan() -> dict[str, Any]:
         if abnormal_count:
             module_issues.append({"module": mod, "abnormal_count": abnormal_count})
 
-    score = max(0, 100 - int(total_anomalies / max(total_rows, 1) * 10000))
     result = {
-        "scan_time": datetime.now().isoformat(),
-        "total_rows_estimated": total_rows,
-        "total_anomalies": total_anomalies,
-        "quality_score": score,
-        "sample_issues": issues,
+        "scan_time": summary["scan_time"],
+        # 兼容旧字段名，但数值改为实测口径，不再是占位估算。
+        "total_rows_estimated": summary["总扫描行数"],
+        "total_scanned_rows": summary["总扫描行数"],
+        "total_anomalies": summary["总异常行数"],
+        "quality_score": summary["质量评分"],
+        "anomaly_rate": summary["实测异常率"],
+        "anomaly_rate_percent": summary["实测异常率百分比"],
+        "needs_manual_review": summary["需人工复核"],
+        "review_threshold": summary["复核门槛"],
+        "covered_batches": summary["覆盖批次"],
+        "rule_results": summary["规则结果"],
+        "sample_issues": summary["质量问题清单"],
+        "missing_denominator": summary["缺分母摘要"],
         "module_issues": module_issues,
     }
 
@@ -390,6 +388,19 @@ def run_quality_scan() -> dict[str, Any]:
         "payload": result,
     })
     return result
+
+
+def run_quality_rescan() -> dict[str, Any]:
+    """补扫管道：为缺分母规则补齐实测扫描行数后重新扫描并刷新评分。
+
+    补扫结果按批次×规则幂等写入；旧的历史摘要（缺分母）保留可查，但不再
+    参与评分。返回补扫后的完整汇总，便于核对新分数与原转交记录。
+    """
+    for sample in QUALITY_RESCAN_SAMPLES:
+        entry, missing = quality_scan_service.upsert_measured_result(sample)
+        if missing:
+            return {"error": f"补扫样本字段不合法：{'、'.join(missing)}"}
+    return run_quality_scan()
 
 
 # ---------------------------------------------------------------------------

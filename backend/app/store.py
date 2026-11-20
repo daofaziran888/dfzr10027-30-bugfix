@@ -51,6 +51,13 @@ store = Store()
 
 
 def reset_store() -> None:
-    """重新初始化全局 store，用于测试隔离。"""
-    global store
-    store = Store()
+    """重新初始化全局 store，用于测试隔离。
+
+    服务层在模块导入时就绑定了 store 实例（``from app.store import store``），
+    若这里直接替换对象，各服务手里的引用仍指向旧仓库，测试数据会跨用例累积。
+    因此改为原地清空并重新装载种子数据，保证所有已持有的引用看到的都是重置后的状态。
+    """
+    store._tables = {
+        name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
+    }
+    store._tables.setdefault("_pipeline_results", [])
